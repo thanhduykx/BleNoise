@@ -21,12 +21,15 @@ struct ContentView: View {
                     LabeledContent("Gói đã phát") {
                         Text("\(engine.packets)").monospacedDigit()
                     }
+                    LabeledContent("Tên đang phát") {
+                        Text(engine.lastName).monospaced()
+                    }
                     HStack {
-                        Text("Chu kỳ")
-                        Slider(value: $engine.interval, in: 0.05...0.5, step: 0.01)
-                        Text(String(format: "%.2fs", engine.interval))
+                        Text("Đổi tên mỗi")
+                        Slider(value: $engine.interval, in: 0.3...3.0, step: 0.1)
+                        Text(String(format: "%.1fs", engine.interval))
                             .monospacedDigit()
-                            .frame(width: 56, alignment: .trailing)
+                            .frame(width: 52, alignment: .trailing)
                     }
                 }
 
@@ -39,15 +42,23 @@ struct ContentView: View {
                     }
                     .buttonStyle(.borderedProminent)
                 } footer: {
-                    Text("Giữ app ở foreground và màn hình sáng. iOS tự giới hạn tần suất quảng cáo BLE nên đây là nhiễu mức nhẹ, không phải jammer thật.")
+                    Text("Bắt buộc: app phải ở foreground, màn hình sáng, đã cấp quyền Bluetooth. Không thấy được trên chính máy này — phải quét bằng máy thứ hai.")
                 }
 
-                Section("iPhone phát được sóng gì?") {
-                    Text("BLE 2.4 GHz (app này)")
-                    Text("Wi-Fi 2.4/5/6 GHz (chỉ tạo tải, không jam)")
-                    Text("NFC 13.56 MHz (chỉ vài cm)")
-                    Text("UWB (không có API phát thô)")
-                    Text("Không có 433 MHz / 125 kHz → không đụng được Smart Key xe")
+                Section("Cách kiểm tra") {
+                    Text("1. Cài nRF Connect trên một điện thoại/tablet khác (hoặc Bluetooth LE Explorer trên PC).")
+                    Text("2. Bấm Bắt đầu ở máy này, rồi quét bằng máy kia.")
+                    Text("3. Danh sách sẽ xuất hiện liên tục các tên ngẫu nhiên 6 ký tự, đổi mỗi vài giây.")
+                    Text("Lưu ý: đây là nhiễu BLE mức nhẹ. Wi-Fi, 4G, sóng Smart Key xe vẫn bình thường — đừng chờ thấy mạng yếu đi.")
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("iPhone có radio gì?") {
+                    Text("BLE 2.4 GHz — app này phát")
+                    Text("Wi-Fi 2.4/5/6 GHz — chỉ tạo tải")
+                    Text("NFC 13.56 MHz — vài cm")
+                    Text("UWB — không có API phát thô")
+                    Text("Không có 433 MHz / 125 kHz")
                         .foregroundStyle(.secondary)
                 }
             }
@@ -62,16 +73,14 @@ final class NoiseEngine: NSObject, ObservableObject {
     @Published private(set) var isRunning = false
     @Published private(set) var packets = 0
     @Published private(set) var stateText = "Chưa bật"
-    @Published var interval: Double = 0.12 {
+    @Published private(set) var lastName = "—"
+    @Published var interval: Double = 1.0 {
         didSet { if isRunning { restartTimer() } }
     }
 
     private var manager: CBPeripheralManager?
     private var timer: Timer?
     private var wantsToRun = false
-    private var counter = 0
-
-    private let serviceUUID = CBUUID(string: "0000FCCD-0000-1000-8000-00805F9B34FB")
 
     func start() {
         wantsToRun = true
@@ -81,7 +90,7 @@ final class NoiseEngine: NSObject, ObservableObject {
         if manager?.state == .poweredOn {
             begin()
         } else {
-            stateText = "Đang chờ Bluetooth…"
+            stateText = "Đang chờ quyền Bluetooth…"
         }
     }
 
@@ -100,42 +109,36 @@ final class NoiseEngine: NSObject, ObservableObject {
         isRunning = true
         stateText = "Đang phát"
         UIApplication.shared.isIdleTimerDisabled = true
-        if m.isAdvertising { m.stopAdvertising() }
-        publishService(on: m)
+        burst(on: m)
         restartTimer()
-    }
-
-    private func publishService(on m: CBPeripheralManager) {
-        m.removeAllServices()
-        let service = CBMutableService(type: serviceUUID, primary: true)
-        service.characteristics = []
-        m.add(service)
     }
 
     private func restartTimer() {
         timer?.invalidate()
-        let t = Timer(timeInterval: max(0.05, interval), repeats: true) { [weak self] _ in
-            self?.burst()
+        let t = Timer(timeInterval: max(0.3, interval), repeats: true) { [weak self] _ in
+            guard let self, let m = self.manager, m.state == .poweredOn else { return }
+            self.burst(on: m)
         }
         RunLoop.main.add(t, forMode: .common)
         timer = t
     }
 
-    private func burst() {
-        guard let m = manager, m.state == .poweredOn else { return }
-        counter += 1
+    private func burst(on m: CBPeripheralManager) {
         if m.isAdvertising { m.stopAdvertising() }
-        m.startAdvertising([
-            CBAdvertisementDataLocalNameKey: Self.randomName(),
-            CBAdvertisementDataServiceUUIDsKey: [serviceUUID]
-        ])
+
+        // Chỉ quảng cáo local name, KHÔNG kèm service UUID.
+        // Lý do: iOS giới hạn gói quảng cáo 31 byte; name + UUID 128-bit dễ vượt
+        // và iOS sẽ cắt mất tên, khiến máy quét thấy "BLE Device" vô danh.
+        let name = Self.randomName()
+        lastName = name
+        m.startAdvertising([CBAdvertisementDataLocalNameKey: name])
         packets += 1
     }
 
     private static func randomName() -> String {
-        let chars = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+        let chars = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
         var s = ""
-        for _ in 0..<Int.random(in: 4...8) {
+        for _ in 0..<6 {
             s.append(chars.randomElement()!)
         }
         return s
@@ -153,6 +156,12 @@ extension NoiseEngine: CBPeripheralManagerDelegate {
             stateText = "Bluetooth đang tắt"
         default:
             stateText = "Bluetooth chưa sẵn sàng"
+        }
+    }
+
+    func peripheralManager(_ peripheral: CBPeripheralManager, didAdd service: CBService, error: Error?) {
+        if let error {
+            stateText = "Lỗi service: \(error.localizedDescription)"
         }
     }
 }
