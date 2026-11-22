@@ -1,0 +1,47 @@
+name: build-ipa
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build unsigned app
+        run: |
+          xcodebuild \
+            -project BleNoise.xcodeproj \
+            -scheme BleNoise \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package IPA
+        run: |
+          APP="build/Build/Products/Release-iphoneos/BleNoise.app"
+          test -d "$APP"
+          rm -rf Payload BleNoise-Unsigned.ipa
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -r BleNoise-Unsigned.ipa Payload
+          ls -lh BleNoise-Unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BleNoise-Unsigned
+          path: BleNoise-Unsigned.ipa
+          if-no-files-found: error
