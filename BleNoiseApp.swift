@@ -24,6 +24,11 @@ struct ContentView: View {
                     LabeledContent("Tên đang phát") {
                         Text(engine.lastName).monospaced()
                     }
+                    LabeledContent("Lỗi phát") {
+                        Text(engine.advError)
+                            .font(.caption)
+                            .foregroundStyle(engine.advError == "—" ? Color.secondary : Color.red)
+                    }
                     HStack {
                         Text("Đổi tên mỗi")
                         Slider(value: $engine.interval, in: 0.3...3.0, step: 0.1)
@@ -87,6 +92,7 @@ final class NoiseEngine: NSObject, ObservableObject {
     @Published private(set) var lastName = "—"
     @Published private(set) var seenLines: [String] = []
     @Published private(set) var seenCount = 0
+    @Published private(set) var advError = "—"
     @Published var interval: Double = 1.0 {
         didSet { if isRunning { restartTimer() } }
     }
@@ -95,6 +101,8 @@ final class NoiseEngine: NSObject, ObservableObject {
     private var central: CBCentralManager?
     private var timer: Timer?
     private var wantsToRun = false
+    private var serviceAdded = false
+    private let serviceUUID = CBUUID(string: "FCCD")
 
     func start() {
         wantsToRun = true
@@ -153,12 +161,16 @@ final class NoiseEngine: NSObject, ObservableObject {
     private func burst(on m: CBPeripheralManager) {
         if m.isAdvertising { m.stopAdvertising() }
 
-        // Chỉ quảng cáo local name, KHÔNG kèm service UUID.
-        // Lý do: iOS giới hạn gói quảng cáo 31 byte; name + UUID 128-bit dễ vượt
-        // và iOS sẽ cắt mất tên, khiến máy quét thấy "BLE Device" vô danh.
         let name = Self.randomName()
         lastName = name
-        m.startAdvertising([CBAdvertisementDataLocalNameKey: name])
+
+        // Gửi kèm service UUID 16-bit (2 byte) để máy quét thấy rõ và để
+        // iOS không coi gói quảng cáo là rỗng. Vẫn vừa 31 byte.
+        var data: [String: Any] = [CBAdvertisementDataLocalNameKey: name]
+        if serviceAdded {
+            data[CBAdvertisementDataServiceUUIDsKey] = [serviceUUID]
+        }
+        m.startAdvertising(data)
         packets += 1
     }
 
@@ -200,6 +212,7 @@ extension NoiseEngine: CBPeripheralManagerDelegate {
     func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
         switch peripheral.state {
         case .poweredOn:
+            addServiceIfNeeded()
             if wantsToRun { begin() }
         case .unauthorized:
             stateText = "Chưa cấp quyền Bluetooth"
@@ -210,9 +223,30 @@ extension NoiseEngine: CBPeripheralManagerDelegate {
         }
     }
 
+    private func addServiceIfNeeded() {
+        guard !serviceAdded, let m = manager, m.state == .poweredOn else { return }
+        let service = CBMutableService(type: serviceUUID, primary: true)
+        service.characteristics = []
+        m.add(service)
+    }
+
     func peripheralManager(_ peripheral: CBPeripheralManager, didAdd service: CBService, error: Error?) {
         if let error {
-            stateText = "Lỗi service: \(error.localizedDescription)"
+            advError = "Lỗi service: \(error.localizedDescription)"
+            return
+        }
+        if service.uuid == serviceUUID {
+            serviceAdded = true
+            if wantsToRun && !isRunning { begin() }
+        }
+    }
+
+    func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager, error: Error?) {
+        if let error {
+            advError = error.localizedDescription
+            stateText = "Lỗi phát"
+        } else {
+            advError = "—"
         }
     }
 }
