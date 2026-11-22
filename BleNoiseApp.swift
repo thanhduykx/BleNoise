@@ -46,11 +46,22 @@ struct ContentView: View {
                 }
 
                 Section("Cách kiểm tra") {
-                    Text("1. Cài nRF Connect trên một điện thoại/tablet khác (hoặc Bluetooth LE Explorer trên PC).")
-                    Text("2. Bấm Bắt đầu ở máy này, rồi quét bằng máy kia.")
-                    Text("3. Danh sách sẽ xuất hiện liên tục các tên ngẫu nhiên 6 ký tự, đổi mỗi vài giây.")
-                    Text("Lưu ý: đây là nhiễu BLE mức nhẹ. Wi-Fi, 4G, sóng Smart Key xe vẫn bình thường — đừng chờ thấy mạng yếu đi.")
+                    Text("Máy này vừa phát vừa nghe. Nếu iOS cho phép, bạn sẽ thấy các dòng bắt đầu bằng NZ- ngay bên dưới.")
+                    Text("Nếu không thấy NZ-, iOS đang chặn tự nghe: dùng PC (Bluetooth LE Explorer) hoặc máy khác để quét.")
+                    Text("Đây là nhiễu BLE mức nhẹ. Wi-Fi, 4G, sóng Smart Key xe vẫn bình thường.")
                         .foregroundStyle(.secondary)
+                }
+
+                Section("Máy này nghe được (\(engine.seenCount))") {
+                    if engine.seenLines.isEmpty {
+                        Text("Chưa có gói nào…").foregroundStyle(.secondary)
+                    } else {
+                        ForEach(Array(engine.seenLines.enumerated()), id: \.offset) { _, line in
+                            Text(line)
+                                .font(.caption)
+                                .monospaced()
+                        }
+                    }
                 }
 
                 Section("iPhone có radio gì?") {
@@ -74,11 +85,14 @@ final class NoiseEngine: NSObject, ObservableObject {
     @Published private(set) var packets = 0
     @Published private(set) var stateText = "Chưa bật"
     @Published private(set) var lastName = "—"
+    @Published private(set) var seenLines: [String] = []
+    @Published private(set) var seenCount = 0
     @Published var interval: Double = 1.0 {
         didSet { if isRunning { restartTimer() } }
     }
 
     private var manager: CBPeripheralManager?
+    private var central: CBCentralManager?
     private var timer: Timer?
     private var wantsToRun = false
 
@@ -86,6 +100,9 @@ final class NoiseEngine: NSObject, ObservableObject {
         wantsToRun = true
         if manager == nil {
             manager = CBPeripheralManager(delegate: self, queue: .main)
+        }
+        if central == nil {
+            central = CBCentralManager(delegate: self, queue: .main)
         }
         if manager?.state == .poweredOn {
             begin()
@@ -99,6 +116,7 @@ final class NoiseEngine: NSObject, ObservableObject {
         timer?.invalidate()
         timer = nil
         manager?.stopAdvertising()
+        central?.stopScan()
         isRunning = false
         stateText = "Đã dừng"
         UIApplication.shared.isIdleTimerDisabled = false
@@ -111,6 +129,15 @@ final class NoiseEngine: NSObject, ObservableObject {
         UIApplication.shared.isIdleTimerDisabled = true
         burst(on: m)
         restartTimer()
+        beginScan()
+    }
+
+    private func beginScan() {
+        guard let c = central, c.state == .poweredOn else { return }
+        c.scanForPeripherals(
+            withServices: nil,
+            options: [CBCentralManagerScanOptionAllowDuplicatesKey: true]
+        )
     }
 
     private func restartTimer() {
@@ -137,11 +164,35 @@ final class NoiseEngine: NSObject, ObservableObject {
 
     private static func randomName() -> String {
         let chars = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
-        var s = ""
-        for _ in 0..<6 {
+        var s = "NZ-"
+        for _ in 0..<4 {
             s.append(chars.randomElement()!)
         }
         return s
+    }
+}
+
+extension NoiseEngine: CBCentralManagerDelegate {
+    func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        if central.state == .poweredOn, isRunning {
+            beginScan()
+        }
+    }
+
+    func centralManager(
+        _ central: CBCentralManager,
+        didDiscover peripheral: CBPeripheral,
+        advertisementData: [String: Any],
+        rssi RSSI: NSNumber
+    ) {
+        let name = (advertisementData[CBAdvertisementDataLocalNameKey] as? String)
+            ?? peripheral.name
+            ?? "(không tên)"
+        seenCount += 1
+        seenLines.insert("\(name)   \(RSSI.intValue) dBm", at: 0)
+        if seenLines.count > 60 {
+            seenLines.removeLast(seenLines.count - 60)
+        }
     }
 }
 
